@@ -16,9 +16,8 @@ try:
 except Exception:
     GEMINI_AVAILABLE = False
 
-# -----------------------
-# Comprehensive BOQ template based on provided structure
-# -----------------------
+# Hardcoded Gemini API Key
+GEMINI_API_KEY = "AIzaSyBT5J7ZvT00QBsQDGIk9GNx03-QKmp0Bm4"
 BOQ_TEMPLATE ={
     "1. Preliminaries": {
         "keywords": ["management", "staff", "accommodation", "temporary", "establishment", "survey", "testing", "commissioning", "handover", "scaffolding", "records", "cleaning", "insurance", "protection"],
@@ -795,6 +794,35 @@ BOQ_TEMPLATE ={
 
 SECTION_ORDER = list(BOQ_TEMPLATE.keys())
 
+# -----------------------
+# BOQ Template will be loaded externally
+# -----------------------
+# Initialize empty template - to be loaded from external source
+
+
+
+def load_boq_template():
+    """Load BOQ template from external source"""
+    global BOQ_TEMPLATE, SECTION_ORDER
+    # This will be populated from your external BOQ template
+    # For now, we'll use a minimal fallback
+    if not BOQ_TEMPLATE:
+        BOQ_TEMPLATE = {
+            "1. Preliminaries": {
+                "keywords": ["management", "staff", "accommodation", "temporary"],
+                "items": ["Project management", "Site establishment", "Temporary works"]
+            },
+            "11. Insitu concrete works": {
+                "keywords": ["concrete", "foundation", "slab", "beam", "column"],
+                "items": ["Mass concrete", "Reinforced concrete", "Formwork"]
+            },
+            "14. Masonry": {
+                "keywords": ["brick", "block", "wall", "masonry"],
+                "items": ["Brick walls", "Block walls", "Cavity walls"]
+            }
+        }
+        SECTION_ORDER = list(BOQ_TEMPLATE.keys())
+
 
 # -----------------------
 # Enhanced extraction functions
@@ -802,6 +830,7 @@ SECTION_ORDER = list(BOQ_TEMPLATE.keys())
 class BOQExtractor:
     def __init__(self):
         self.section_scores = {}
+        load_boq_template()
 
     def calculate_relevance_score(self, text: str, section: str, keywords: List[str]) -> float:
         """Calculate relevance score for a section based on keyword matching"""
@@ -876,14 +905,14 @@ class BOQExtractor:
                     item_keywords = item.lower().split()
                     item_relevance = any(kw in text for kw in item_keywords if len(kw) > 3)
 
-                    if item_relevance or score > 0.5:  # Include if item is relevant or section is highly relevant
+                    if item_relevance or score > 0.5:
                         # Try to match quantities
                         qty = 1
                         unit = "LS"
 
                         # Use extracted quantities if available
                         if quantities:
-                            qty, unit = quantities[0]  # Use first quantity found
+                            qty, unit = quantities[0]
                         else:
                             # Smart unit assignment based on item type
                             if any(word in item.lower() for word in ["wall", "floor", "ceiling", "roof"]):
@@ -923,41 +952,42 @@ class BOQExtractor:
 
 
 # -----------------------
-# Gemini wrapper (enhanced)
+# Gemini wrapper (enhanced with hardcoded API key)
 # -----------------------
-def configure_gemini(api_key: str):
+def configure_gemini():
+    """Configure Gemini with hardcoded API key"""
     if not GEMINI_AVAILABLE:
         raise RuntimeError("google.generativeai not installed.")
-    genai.configure(api_key=api_key)
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 def call_gemini_extract(project_description: str) -> str:
+    """Call Gemini API for BOQ extraction"""
     model = genai.GenerativeModel("gemini-2.0-flash")
 
-    # Create a comprehensive prompt with the full BOQ structure
-    sections_list = "\n".join([f"- {section}" for section in BOQ_TEMPLATE.keys()])
-
     prompt = f"""
-You are an expert quantity surveyor. Analyze this project description and identify ONLY the most relevant BOQ sections and items.
+You are an expert quantity surveyor. Analyze this project description and create a comprehensive Bill of Quantities.
 
 Project description:
 \"\"\"{project_description}\"\"\"
 
-Available BOQ sections:
-{sections_list}
-
 Instructions:
-1. Identify 3-8 most relevant sections from the list above
-2. For each relevant section, select 2-5 most applicable items
-3. Extract or estimate quantities where possible from the description
+1. Identify relevant construction work sections (e.g., Preliminaries, Excavation, Concrete, Masonry, etc.)
+2. For each section, list specific work items that would be required
+3. Extract or estimate quantities from the description where possible
 4. Return each item in this EXACT format:
 SECTION | ITEM | QTY | UNIT | RATE | AMOUNT | NOTES
 
-Units: Use m2 for areas, m3 for volumes, m for lengths, nr for counted items, LS for lump sum
-If quantity unknown, use 0 and note "Quantity to be confirmed"
-If rate unknown, use 0 and note "Rate to be confirmed"
+Guidelines:
+- Use standard units: m2 for areas, m3 for volumes, m for lengths, nr for counted items, LS for lump sum
+- If quantity is unknown, use 0 and note "Quantity to be confirmed"
+- If rate is unknown, use 0 and note "Rate to be confirmed"
+- Focus on items that are clearly relevant to this specific project
+- Include preliminaries, main construction items, finishes, and services as applicable
 
-Focus on quality over quantity - only include items that are clearly relevant to this specific project.
+Example format:
+1. Preliminaries | Project management | 1 | LS | 0 | 0 | Rate to be confirmed
+5. Excavation and filling | Site excavation | 150 | m3 | 0 | 0 | Quantity estimated from description
 """
 
     response = model.generate_content(prompt)
@@ -965,7 +995,7 @@ Focus on quality over quantity - only include items that are clearly relevant to
 
 
 # -----------------------
-# Parsing and data processing functions (unchanged but optimized)
+# Parsing and data processing functions
 # -----------------------
 def parse_gemini_lines_to_structured(text_lines: str) -> Dict:
     """Parse Gemini output with better error handling"""
@@ -1004,7 +1034,7 @@ def parse_gemini_lines_to_structured(text_lines: str) -> Dict:
 
 
 def structured_to_item_df(structured_boq: Dict) -> pd.DataFrame:
-    """Convert structured BOQ to DataFrame with better column handling"""
+    """Convert structured BOQ to DataFrame"""
     rows = []
     for section, items in structured_boq.items():
         for item_data in items:
@@ -1031,22 +1061,11 @@ def build_summary_dataframe(structured_boq: Dict) -> pd.DataFrame:
     rows = []
     total = 0.0
 
-    # Process sections in predefined order
-    processed_sections = set()
-    for section in SECTION_ORDER:
-        items = structured_boq.get(section, [])
-        if items:  # Only include sections with items
-            section_amount = sum(item.get("amount", 0) for item in items)
-            rows.append({"Bill Description": section, "Amount": section_amount})
-            total += section_amount
-            processed_sections.add(section)
-
-    # Add any additional sections not in predefined order
+    # Process all sections
     for section, items in structured_boq.items():
-        if section not in processed_sections:
-            section_amount = sum(item.get("amount", 0) for item in items)
-            rows.append({"Bill Description": section, "Amount": section_amount})
-            total += section_amount
+        section_amount = sum(item.get("amount", 0) for item in items)
+        rows.append({"Bill Description": section, "Amount": section_amount})
+        total += section_amount
 
     # Add total row
     rows.append({"Bill Description": "TOTAL", "Amount": total})
@@ -1054,13 +1073,16 @@ def build_summary_dataframe(structured_boq: Dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# PDF and Excel export functions (unchanged)
+# PDF and Excel export functions
 def df_to_excel_bytes(summary_df: pd.DataFrame, items_df: pd.DataFrame, project_meta: Dict) -> bytes:
     with io.BytesIO() as buffer:
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            # Main detailed BOQ sheet
+            items_df.to_excel(writer, sheet_name="BOQ_DETAILED", index=False)
+            # Summary as secondary sheet
             summary_df.to_excel(writer, sheet_name="SUMMARY", index=False)
-            items_df.to_excel(writer, sheet_name="ITEMS", index=False)
-            pd.DataFrame([project_meta]).to_excel(writer, sheet_name="META", index=False)
+            # Project metadata
+            pd.DataFrame([project_meta]).to_excel(writer, sheet_name="PROJECT_INFO", index=False)
         return buffer.getvalue()
 
 
@@ -1071,41 +1093,60 @@ def df_to_pdf_bytes(summary_df: pd.DataFrame, items_df: pd.DataFrame, project_me
     styles = getSampleStyleSheet()
 
     # Header
+    elements.append(Paragraph(f"BILL OF QUANTITIES - DETAILED", styles['Heading1']))
+    elements.append(Spacer(1, 12))
     elements.append(Paragraph(f"Project: {project_meta.get('Project', 'N/A')}", styles['Heading2']))
     elements.append(Paragraph(f"Location: {project_meta.get('Location', 'N/A')}", styles['Normal']))
-    elements.append(Spacer(1, 12))
-
-    # Summary table
-    elements.append(Paragraph("BILL OF QUANTITIES - SUMMARY", styles['Heading3']))
-    summary_data = [summary_df.columns.tolist()] + summary_df.round(2).values.tolist()
-    summary_table = Table(summary_data, hAlign='LEFT')
-    summary_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 12),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black)
-    ]))
-    elements.append(summary_table)
+    elements.append(Paragraph(f"Client: {project_meta.get('Client', 'N/A')}", styles['Normal']))
+    elements.append(Paragraph(f"Generated: {project_meta.get('Generated', 'N/A')}", styles['Normal']))
     elements.append(Spacer(1, 20))
 
-    # Items table
-    elements.append(Paragraph("DETAILED ITEMS", styles['Heading3']))
-    items_data = [items_df.columns.tolist()] + items_df.values.tolist()
+    # Detailed Items table (main content)
+    elements.append(Paragraph("DETAILED BILL OF QUANTITIES", styles['Heading2']))
+
+    # Format numeric columns for better display
+    items_display = items_df.copy()
+    items_display['Qty'] = items_display['Qty'].round(2)
+    items_display['Rate'] = items_display['Rate'].round(2)
+    items_display['Amount'] = items_display['Amount'].round(2)
+
+    items_data = [items_display.columns.tolist()] + items_display.values.tolist()
     items_table = Table(items_data, hAlign='LEFT')
     items_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('ALIGN', (2, 1), (5, -1), 'RIGHT'),  # Right align numeric columns
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 10),
         ('FONTSIZE', (0, 1), (-1, -1), 8),
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.black)
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP')
     ]))
     elements.append(items_table)
+    elements.append(Spacer(1, 30))
+
+    # Summary table (secondary)
+    elements.append(Paragraph("SUMMARY", styles['Heading3']))
+    summary_data = [summary_df.columns.tolist()] + summary_df.round(2).values.tolist()
+    summary_table = Table(summary_data, hAlign='LEFT')
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.darkgrey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('ALIGN', (1, 1), (1, -1), 'RIGHT'),  # Right align amounts
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 11),
+        ('FONTSIZE', (0, 1), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -2), colors.lightgrey),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.yellow),  # Highlight total row
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+    ]))
+    elements.append(summary_table)
 
     doc.build(elements)
     buffer.seek(0)
@@ -1113,7 +1154,7 @@ def df_to_pdf_bytes(summary_df: pd.DataFrame, items_df: pd.DataFrame, project_me
 
 
 # -----------------------
-# Streamlit UI (Enhanced)
+# Streamlit UI (Simplified without API key input)
 # -----------------------
 def main():
     st.set_page_config(
@@ -1137,14 +1178,13 @@ def main():
 
         st.divider()
 
-        # AI Configuration
+        # AI Configuration (simplified)
         st.subheader("AI Settings")
-        use_gemini = st.checkbox("Use Gemini AI", value=False, help="Enable AI-powered extraction")
+        use_gemini = st.checkbox("Use Gemini AI", value=True, help="Enable AI-powered extraction")
 
-        if use_gemini:
-            api_key = st.text_input("Gemini API Key", type="password", help="Get your API key from Google AI Studio")
-            if not api_key:
-                st.warning("⚠️ API key required for Gemini")
+        if use_gemini and not GEMINI_AVAILABLE:
+            st.error("❌ Gemini AI not available. Please install google-generativeai package.")
+            use_gemini = False
 
         st.divider()
 
@@ -1199,7 +1239,7 @@ def main():
         st.subheader("📊 Extraction Stats")
         if 'section_scores' in st.session_state:
             scores_df = pd.DataFrame(
-                [(k.split('.')[1].strip(), v) for k, v in st.session_state.section_scores.items()],
+                [(k.split('.')[1].strip() if '.' in k else k, v) for k, v in st.session_state.section_scores.items()],
                 columns=['Section', 'Relevance Score']
             ).sort_values('Relevance Score', ascending=False)
             st.dataframe(scores_df, use_container_width=True)
@@ -1211,8 +1251,8 @@ def main():
             structured = {}
 
             try:
-                if use_gemini and 'api_key' in locals() and api_key:
-                    configure_gemini(api_key)
+                if use_gemini:
+                    configure_gemini()
                     gemini_response = call_gemini_extract(project_description)
                     structured = parse_gemini_lines_to_structured(gemini_response)
 
@@ -1234,82 +1274,114 @@ def main():
                 structured = extractor.intelligent_extract(project_description)
 
         if structured:
-            # Convert to DataFrames
+            # Convert to DataFrames and store in session state
             items_df = structured_to_item_df(structured)
+            st.session_state.items_df = items_df
+            st.session_state.boq_generated = True
 
-            st.subheader("✏️ Review and Edit Items")
-            st.info("💡 Edit quantities and rates. Amounts will be auto-calculated.")
+    # Display BOQ data if available in session state
+    if st.session_state.get('boq_generated', False) and 'items_df' in st.session_state:
+        st.subheader("✏️ Review and Edit Items")
+        st.info("💡 Edit quantities and rates. Amounts will be auto-calculated.")
 
-            # Editable data table
-            edited_df = st.data_editor(
-                items_df,
-                num_rows="dynamic",
-                use_container_width=True,
-                column_config={
-                    "Qty": st.column_config.NumberColumn("Quantity", format="%.2f"),
-                    "Rate": st.column_config.NumberColumn("Rate (£)", format="£%.2f"),
-                    "Amount": st.column_config.NumberColumn("Amount (£)", format="£%.2f")
-                }
-            )
+        # Initialize edited_df_key if not exists
+        if 'edited_df_key' not in st.session_state:
+            st.session_state.edited_df_key = 0
 
-            # Recalculate amounts
-            try:
-                edited_df["Amount"] = pd.to_numeric(edited_df["Qty"], errors='coerce').fillna(0) * \
-                                      pd.to_numeric(edited_df["Rate"], errors='coerce').fillna(0)
-            except Exception:
-                st.warning("⚠️ Error calculating amounts. Please check numeric values.")
+        # Create a copy to avoid reference issues
+        current_df = st.session_state.items_df.copy()
 
-            # Generate summary
-            summary_df = edited_df.groupby("Section", sort=False)["Amount"].sum().reset_index()
-            summary_df.columns = ["Bill Description", "Amount"]
+        # Recalculate amounts before displaying
+        try:
+            current_df["Amount"] = pd.to_numeric(current_df["Qty"], errors='coerce').fillna(0) * \
+                                   pd.to_numeric(current_df["Rate"], errors='coerce').fillna(0)
+        except Exception:
+            st.warning("⚠️ Error calculating amounts. Please check numeric values.")
 
-            # Add total row
-            total_amount = summary_df["Amount"].sum()
-            summary_df = pd.concat([
-                summary_df,
-                pd.DataFrame([{"Bill Description": "TOTAL", "Amount": total_amount}])
-            ], ignore_index=True)
+        # Editable data table using session state with unique key
+        edited_df = st.data_editor(
+            current_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            key=f"boq_editor_{st.session_state.edited_df_key}",
+            column_config={
+                "Qty": st.column_config.NumberColumn("Quantity", format="%.2f"),
+                "Rate": st.column_config.NumberColumn("Rate (£)", format="£%.2f"),
+                "Amount": st.column_config.NumberColumn("Amount (£)", format="£%.2f", disabled=True)
+            },
+            hide_index=True
+        )
 
-            # Display summary
-            st.subheader("📋 Bill of Quantities Summary")
-            st.dataframe(
-                summary_df.style.format({"Amount": "£{:.2f}"}),
+        # Check if data has been edited and update session state
+        if not edited_df.equals(current_df):
+            # Recalculate amounts for edited data
+            edited_df["Amount"] = pd.to_numeric(edited_df["Qty"], errors='coerce').fillna(0) * \
+                                  pd.to_numeric(edited_df["Rate"], errors='coerce').fillna(0)
+
+            # Update session state
+            st.session_state.items_df = edited_df.copy()
+
+        # Use the current dataframe for calculations
+        working_df = edited_df
+
+        # Generate summary
+        summary_df = working_df.groupby("Section", sort=False)["Amount"].sum().reset_index()
+        summary_df.columns = ["Bill Description", "Amount"]
+
+        # Add total row
+        total_amount = summary_df["Amount"].sum()
+        summary_df = pd.concat([
+            summary_df,
+            pd.DataFrame([{"Bill Description": "TOTAL", "Amount": total_amount}])
+        ], ignore_index=True)
+
+        # Display summary
+        st.subheader("📋 Bill of Quantities Summary")
+        st.dataframe(
+            summary_df.style.format({"Amount": "£{:.2f}"}),
+            use_container_width=True
+        )
+
+        # Clear BOQ button
+        if st.button("🗑️ Clear BOQ and Start Over", type="secondary"):
+            for key in ['boq_generated', 'items_df', 'section_scores', 'edited_df_key']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+
+        # Project metadata for export
+        project_meta = {
+            "Project": project_name or "Unnamed Project",
+            "Location": project_location or "Not specified",
+            "Client": project_client or "Not specified",
+            "Generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+        }
+
+        # Export buttons
+        st.subheader("📥 Export Options")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            excel_bytes = df_to_excel_bytes(summary_df, working_df, project_meta)
+            st.download_button(
+                "📊 Download Excel",
+                data=excel_bytes,
+                file_name=f"BOQ_{project_name or 'project'}_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
 
-            # Project metadata for export
-            project_meta = {
-                "Project": project_name or "Unnamed Project",
-                "Location": project_location or "Not specified",
-                "Client": project_client or "Not specified",
-                "Generated": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
-            }
+        with col2:
+            pdf_bytes = df_to_pdf_bytes(summary_df, working_df, project_meta)
+            st.download_button(
+                "📄 Download PDF",
+                data=pdf_bytes,
+                file_name=f"BOQ_{project_name or 'project'}_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
 
-            # Export buttons
-            st.subheader("📥 Export Options")
-            col1, col2 = st.columns(2)
-
-            with col1:
-                excel_bytes = df_to_excel_bytes(summary_df, edited_df, project_meta)
-                st.download_button(
-                    "📊 Download Excel",
-                    data=excel_bytes,
-                    file_name=f"BOQ_{project_name or 'project'}_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-
-            with col2:
-                pdf_bytes = df_to_pdf_bytes(summary_df, edited_df, project_meta)
-                st.download_button(
-                    "📄 Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"BOQ_{project_name or 'project'}_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-
-            st.success("🎉 BOQ generated successfully!")
+        st.success("🎉 BOQ generated successfully!")
 
     elif analyze_button:
         st.warning("⚠️ Please enter a project description before generating the BOQ.")
