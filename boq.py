@@ -18,6 +18,8 @@ except Exception:
 
 # Hardcoded Gemini API Key
 GEMINI_API_KEY = "AIzaSyBT5J7ZvT00QBsQDGIk9GNx03-QKmp0Bm4"
+
+# Initialize empty template - to be loaded from external source
 BOQ_TEMPLATE ={
     "1. Preliminaries": {
         "keywords": ["management", "staff", "accommodation", "temporary", "establishment", "survey", "testing", "commissioning", "handover", "scaffolding", "records", "cleaning", "insurance", "protection"],
@@ -794,31 +796,19 @@ BOQ_TEMPLATE ={
 
 SECTION_ORDER = list(BOQ_TEMPLATE.keys())
 
-# -----------------------
-# BOQ Template will be loaded externally
-# -----------------------
-# Initialize empty template - to be loaded from external source
-
 
 
 def load_boq_template():
     """Load BOQ template from external source"""
     global BOQ_TEMPLATE, SECTION_ORDER
     # This will be populated from your external BOQ template
-    # For now, we'll use a minimal fallback
+    # Template should be pasted here by user
     if not BOQ_TEMPLATE:
+        st.warning("Please paste your BOQ template in the code where indicated.")
         BOQ_TEMPLATE = {
             "1. Preliminaries": {
                 "keywords": ["management", "staff", "accommodation", "temporary"],
                 "items": ["Project management", "Site establishment", "Temporary works"]
-            },
-            "11. Insitu concrete works": {
-                "keywords": ["concrete", "foundation", "slab", "beam", "column"],
-                "items": ["Mass concrete", "Reinforced concrete", "Formwork"]
-            },
-            "14. Masonry": {
-                "keywords": ["brick", "block", "wall", "masonry"],
-                "items": ["Brick walls", "Block walls", "Cavity walls"]
             }
         }
         SECTION_ORDER = list(BOQ_TEMPLATE.keys())
@@ -939,7 +929,9 @@ class BOQExtractor:
 
         # Always include Preliminaries if nothing detected
         if not structured:
-            structured["1. Preliminaries"] = [{
+            # Find preliminaries section with original numbering
+            prelim_key = next((k for k in BOQ_TEMPLATE.keys() if "preliminaries" in k.lower()), "1. Preliminaries")
+            structured[prelim_key] = [{
                 "item": "Project specific management and staff",
                 "qty": 1,
                 "unit": "LS",
@@ -965,17 +957,24 @@ def call_gemini_extract(project_description: str) -> str:
     """Call Gemini API for BOQ extraction"""
     model = genai.GenerativeModel("gemini-2.0-flash")
 
+    # Create sections list for Gemini prompt
+    sections_list = "\n".join([f"- {section}" for section in BOQ_TEMPLATE.keys()])
+
     prompt = f"""
 You are an expert quantity surveyor. Analyze this project description and create a comprehensive Bill of Quantities.
+
+Available sections (use EXACTLY these section names with original numbering):
+{sections_list}
 
 Project description:
 \"\"\"{project_description}\"\"\"
 
 Instructions:
-1. Identify relevant construction work sections (e.g., Preliminaries, Excavation, Concrete, Masonry, etc.)
-2. For each section, list specific work items that would be required
-3. Extract or estimate quantities from the description where possible
-4. Return each item in this EXACT format:
+1. Identify relevant construction work sections from the list above
+2. Use the EXACT section names provided (including numbers like "1. Preliminaries", "5. Excavation and filling")
+3. For each section, list specific work items that would be required
+4. Extract or estimate quantities from the description where possible
+5. Return each item in this EXACT format:
 SECTION | ITEM | QTY | UNIT | RATE | AMOUNT | NOTES
 
 Guidelines:
@@ -983,7 +982,7 @@ Guidelines:
 - If quantity is unknown, use 0 and note "Quantity to be confirmed"
 - If rate is unknown, use 0 and note "Rate to be confirmed"
 - Focus on items that are clearly relevant to this specific project
-- Include preliminaries, main construction items, finishes, and services as applicable
+- MAINTAIN original section numbering (e.g., "1. Preliminaries", "5. Excavation and filling")
 
 Example format:
 1. Preliminaries | Project management | 1 | LS | 0 | 0 | Rate to be confirmed
@@ -998,7 +997,7 @@ Example format:
 # Parsing and data processing functions
 # -----------------------
 def parse_gemini_lines_to_structured(text_lines: str) -> Dict:
-    """Parse Gemini output with better error handling"""
+    """Parse Gemini output with better error handling and preserve original section numbering"""
     structured = {}
     for raw_line in text_lines.splitlines():
         line = raw_line.strip()
@@ -1009,6 +1008,18 @@ def parse_gemini_lines_to_structured(text_lines: str) -> Dict:
         if len(parts) >= 6:
             section, item, qty, unit, rate, amount = parts[:6]
             notes = parts[6] if len(parts) > 6 else ""
+
+            # Ensure section matches template keys exactly
+            # Find matching section in template (case-insensitive)
+            matched_section = None
+            for template_section in BOQ_TEMPLATE.keys():
+                if section.lower().strip() in template_section.lower() or template_section.lower() in section.lower().strip():
+                    matched_section = template_section
+                    break
+
+            # If no match found, use the section as provided
+            if not matched_section:
+                matched_section = section
 
             try:
                 qty_val = float(qty) if qty and qty != '0' else 0.0
@@ -1028,18 +1039,26 @@ def parse_gemini_lines_to_structured(text_lines: str) -> Dict:
                 "notes": notes or "Extracted by AI"
             }
 
-            structured.setdefault(section, []).append(row)
+            structured.setdefault(matched_section, []).append(row)
 
     return structured
 
 
 def structured_to_item_df(structured_boq: Dict) -> pd.DataFrame:
-    """Convert structured BOQ to DataFrame"""
+    """Convert structured BOQ to DataFrame with preserved section ordering"""
     rows = []
-    for section, items in structured_boq.items():
+
+    # Create a mapping of sections to maintain original order
+    section_order_map = {section: i for i, section in enumerate(BOQ_TEMPLATE.keys())}
+
+    # Sort structured_boq by original template order
+    sorted_sections = sorted(structured_boq.items(),
+                             key=lambda x: section_order_map.get(x[0], 999))
+
+    for section, items in sorted_sections:
         for item_data in items:
             rows.append({
-                "Section": section,
+                "Section": section,  # This preserves the original numbering
                 "Item Description": item_data["item"],
                 "Qty": item_data["qty"],
                 "Unit": item_data["unit"],
@@ -1057,14 +1076,21 @@ def structured_to_item_df(structured_boq: Dict) -> pd.DataFrame:
 
 
 def build_summary_dataframe(structured_boq: Dict) -> pd.DataFrame:
-    """Build summary with proper ordering and totals"""
+    """Build summary with proper ordering and totals, preserving original section numbering"""
     rows = []
     total = 0.0
 
-    # Process all sections
-    for section, items in structured_boq.items():
+    # Create a mapping of sections to maintain original order
+    section_order_map = {section: i for i, section in enumerate(BOQ_TEMPLATE.keys())}
+
+    # Sort sections by original template order
+    sorted_sections = sorted(structured_boq.items(),
+                             key=lambda x: section_order_map.get(x[0], 999))
+
+    # Process sections in original order
+    for section, items in sorted_sections:
         section_amount = sum(item.get("amount", 0) for item in items)
-        rows.append({"Bill Description": section, "Amount": section_amount})
+        rows.append({"Bill Description": section, "Amount": section_amount})  # Preserves original numbering
         total += section_amount
 
     # Add total row
@@ -1239,7 +1265,7 @@ def main():
         st.subheader("📊 Extraction Stats")
         if 'section_scores' in st.session_state:
             scores_df = pd.DataFrame(
-                [(k.split('.')[1].strip() if '.' in k else k, v) for k, v in st.session_state.section_scores.items()],
+                [(k, v) for k, v in st.session_state.section_scores.items()],
                 columns=['Section', 'Relevance Score']
             ).sort_values('Relevance Score', ascending=False)
             st.dataframe(scores_df, use_container_width=True)
@@ -1324,16 +1350,25 @@ def main():
         # Use the current dataframe for calculations
         working_df = edited_df
 
-        # Generate summary
-        summary_df = working_df.groupby("Section", sort=False)["Amount"].sum().reset_index()
-        summary_df.columns = ["Bill Description", "Amount"]
+        # Generate summary with preserved section ordering
+        # Group by Section while preserving original order
+        section_order_map = {section: i for i, section in enumerate(BOQ_TEMPLATE.keys())}
+
+        summary_data = []
+        total_amount = 0.0
+
+        # Group by section and sort by original template order
+        grouped = working_df.groupby("Section", sort=False)["Amount"].sum()
+        sorted_sections = sorted(grouped.items(),
+                                 key=lambda x: section_order_map.get(x[0], 999))
+
+        for section, amount in sorted_sections:
+            summary_data.append({"Bill Description": section, "Amount": amount})
+            total_amount += amount
 
         # Add total row
-        total_amount = summary_df["Amount"].sum()
-        summary_df = pd.concat([
-            summary_df,
-            pd.DataFrame([{"Bill Description": "TOTAL", "Amount": total_amount}])
-        ], ignore_index=True)
+        summary_data.append({"Bill Description": "TOTAL", "Amount": total_amount})
+        summary_df = pd.DataFrame(summary_data)
 
         # Display summary
         st.subheader("📋 Bill of Quantities Summary")
